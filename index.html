@@ -82,6 +82,7 @@
   #reader{flex:1;width:100%;overflow:hidden}
   #reader video{object-fit:cover}
   .hint{color:#ddd;text-align:center;font-size:14px;padding:14px 16px max(18px,env(safe-area-inset-bottom))}
+  .photobtn{margin-top:10px;background:#fff;color:var(--ink);border:0;border-radius:10px;padding:11px 16px;font-size:15px;font-weight:600}
   .toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:var(--warn);color:#fff;
     padding:10px 16px;border-radius:10px;font-size:14px;z-index:40;display:none;max-width:90vw;text-align:center}
 </style>
@@ -115,8 +116,11 @@
 <div class="scanner" id="scanner">
   <div class="top"><b>Scan label</b><button id="closeScan">Close</button></div>
   <div id="reader"></div>
-  <div class="hint">Hold the barcode inside the box, about a hand's length from the camera.</div>
+  <div class="hint">Fill the box with the barcode, about 10–15 cm away. Hold steady.<br>
+    <button id="photoScan" class="photobtn">Not scanning? Take a photo instead</button></div>
 </div>
+<input type="file" id="photoInput" accept="image/*" capture="environment" hidden>
+<div id="fileReader" style="display:none"></div>
 <div class="toast" id="toast"></div>
 
 <script src="js/html5-qrcode.min.js"></script>
@@ -188,26 +192,46 @@
 
   // ---------- scanner ----------
   var scanner=null, busy=false;
+  function fmts(){var F=Html5QrcodeSupportedFormats;return [F.CODE_128,F.CODE_39,F.EAN_13,F.QR_CODE]}
+  function handle(text){
+    var it=find(text);
+    if(it){ $("q").value=it.name; render(); open(it); if(navigator.vibrate)navigator.vibrate(60); }
+    else { $("q").value=text; render(); toast("No item with this barcode: "+text); }
+  }
   function startScan(){
     if(!window.Html5Qrcode){toast("Scanner could not load. Type the code instead.");return}
     $("scanner").classList.add("open"); busy=false;
-    var F=Html5QrcodeSupportedFormats;
-    scanner=new Html5Qrcode("reader",{formatsToSupport:[F.CODE_128,F.CODE_39,F.EAN_13,F.QR_CODE],verbose:false,
+    scanner=new Html5Qrcode("reader",{formatsToSupport:fmts(),verbose:false,
       experimentalFeatures:{useBarCodeDetectorIfSupported:true}});
-    var w=Math.min(window.innerWidth*0.88,420);
-    scanner.start({facingMode:"environment"},{fps:12,qrbox:{width:w,height:Math.round(w*0.45)},aspectRatio:window.innerHeight/window.innerWidth},
-      function(text){
-        if(busy) return; busy=true;
-        var it=find(text);
-        stopScan().then(function(){
-          if(it){ $("q").value=it.name; render(); open(it); if(navigator.vibrate)navigator.vibrate(60); }
-          else { $("q").value=text; render(); toast("No item with this barcode: "+text); }
-        });
-      }, function(){}
-    ).catch(function(err){
-      stopScan(); toast("Camera not available. Allow camera access, or type the code.");
+    var cfg={fps:15,
+      qrbox:function(vw,vh){var w=Math.floor(Math.min(vw*0.92,700));return {width:w,height:Math.floor(Math.min(vh*0.5,w*0.5))}},
+      videoConstraints:{facingMode:"environment",width:{ideal:1920},height:{ideal:1080}}};
+    var onOk=function(text){ if(busy) return; busy=true; stopScan().then(function(){handle(text)}); };
+    scanner.start({facingMode:"environment"},cfg,onOk,function(){})
+    .then(function(){
+      // ask for continuous autofocus where supported (Android)
+      try{var tr=scanner.getRunningTrackCameraCapabilities&&scanner.getRunningTrackCameraCapabilities();
+        var t=document.querySelector("#reader video");var tk=t&&t.srcObject&&t.srcObject.getVideoTracks()[0];
+        if(tk&&tk.getCapabilities&&(tk.getCapabilities().focusMode||[]).indexOf("continuous")>-1){tk.applyConstraints({advanced:[{focusMode:"continuous"}]})}}catch(e){}
+    })
+    .catch(function(){
+      // retry with plain settings (older phones / in-app browsers)
+      var s2=new Html5Qrcode("reader",{formatsToSupport:fmts(),verbose:false});
+      scanner=s2;
+      s2.start({facingMode:"environment"},{fps:10,qrbox:{width:280,height:140}},onOk,function(){})
+      .catch(function(){ stopScan(); toast("Camera blocked. Open the link in Safari/Chrome, or use 'Take a photo'."); });
     });
   }
+  // photo fallback: full-resolution still image is far easier to read than live video
+  $("photoScan").onclick=function(){ stopScan().then(function(){ $("photoInput").click(); }); };
+  $("photoInput").onchange=function(){
+    var f=this.files&&this.files[0]; this.value=""; if(!f) return;
+    toast("Reading barcode…");
+    var r=new Html5Qrcode("fileReader",{formatsToSupport:fmts(),verbose:false,experimentalFeatures:{useBarCodeDetectorIfSupported:true}});
+    r.scanFile(f,false).then(function(text){ $("toast").style.display="none"; handle(text); })
+     .catch(function(){ toast("Couldn't read it. Take the photo closer, with only one label in view."); })
+     .then(function(){try{r.clear()}catch(e){}});
+  };
   function stopScan(){
     $("scanner").classList.remove("open");
     if(!scanner) return Promise.resolve();
